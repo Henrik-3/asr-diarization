@@ -1,0 +1,24 @@
+services:
+  nemo-speech:
+    build: .
+    image: local/nemo-speech-api:0.2.0
+    container_name: nemo-speech
+    restart: unless-stopped
+    ports:
+      - "8000:8000"
+    environment:
+      ASR_MODEL: nvidia/nemotron-3.5-asr-streaming-0.6b
+      DIARIZATION_MODEL: nvidia/Nemotron-3-Diarization
+      SERVED_ASR_MODEL: nvidia/nemotron-3.5-asr-streaming-0.6b
+      SERVED_DIARIZED_MODEL: nvidia/nemotron-3.5-asr-streaming-0.6b-diarize
+      SERVED_DIARIZATION_MODEL: nvidia/Nemotron-3-Diarization
+      DEVICE: cuda
+      DEFAULT_LANGUAGE: de
+      MAX_UPLOAD_MB: "25"
+      LOG_LEVEL: INFO
+      # API_KEY: sk-local
+      # HF_TOKEN: ${HF_TOKEN}
+    volumes:
+      - ./model-cache:/models/huggingface
+    shm_size: "4gb"
+    gpus: all
