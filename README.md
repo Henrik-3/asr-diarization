@@ -51,7 +51,7 @@ docker run --rm -p 8000:8000 -e ASR_MODEL=small \
   ghcr.io/henrik-3/asr-diarization:latest-whisper
 ```
 
-For a different NeMo checkpoint set `ASR_MODEL` in `docker-compose.yml`, or override it at runtime. To build locally: `docker compose build` is replaced by `docker build -t local/speech-api .` (or `docker build -f Dockerfile.whisper -t local/speech-api-whisper .`). The NeMo compose setup requires an NVIDIA GPU and NVIDIA Container Toolkit. The Whisper image defaults to CPU; GPU CTranslate2 deployments require compatible CUDA/cuDNN libraries not included in the CPU image.
+For a different NeMo checkpoint set `ASR_MODEL` in `docker-compose.yml`, or override it at runtime. To build locally: `docker compose build` is replaced by `docker build -t local/speech-api .` (or `docker build -f Dockerfile.whisper -t local/speech-api-whisper .`). The NeMo compose setup requires an NVIDIA GPU and NVIDIA Container Toolkit. Its image uses a slim Python base and CUDA 13.0 PyTorch/TorchAudio wheels, but NeMo and CUDA dependencies still make it multi-gigabyte. The Whisper image defaults to CPU and is considerably smaller; GPU CTranslate2 deployments require compatible CUDA/cuDNN libraries not included in the CPU image.
 
 ### Local Python
 
@@ -78,6 +78,19 @@ For a local faster-whisper installation instead, install `requirements-whisper.t
 ## Standard transcription
 
 For OpenAI SDKs, use `base_url="http://localhost:8000/v1"`, `api_key="sk-local"` (or the value of `API_KEY` if configured), and a model ID returned by `GET /v1/models`.
+
+Quick test with [Whisper's JFK speech sample](https://github.com/openai/whisper/blob/main/tests/jfk.flac) (~1.1 MB, English, one speaker):
+
+```bash
+curl -L -o jfk.flac https://raw.githubusercontent.com/openai/whisper/main/tests/jfk.flac
+curl http://localhost:8000/v1/audio/transcriptions \
+  -F 'file=@jfk.flac' \
+  -F 'model=nvidia/nemotron-3.5-asr-streaming-0.6b' \
+  -F 'language=en'
+# With the Whisper image instead, use -F 'model=small'.
+```
+
+It should contain JFK's “ask not what your country can do for you” line. This tests transcription, not multiple-speaker diarization.
 
 ```bash
 curl http://localhost:8000/v1/audio/transcriptions \
