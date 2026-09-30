@@ -3,6 +3,7 @@ uvicorn[standard]
 python-multipart
 # Nemotron-3-Diarization requires TransformerEncoder RoPE support absent in NeMo 3.0.0.
 nemo-toolkit[asr] @ git+https://github.com/NVIDIA-NeMo/Speech.git@00278b0bd95bb2b8174b88012aa21b003c59d2e9
-torch
-torchaudio
+# Keep these matched to the CUDA 13.0 PyTorch base image.
+torch==2.11.0
+torchaudio==2.11.0
 soundfile
