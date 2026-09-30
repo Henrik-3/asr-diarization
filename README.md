@@ -51,7 +51,13 @@ docker run --rm -p 8000:8000 -e ASR_MODEL=small \
   ghcr.io/henrik-3/asr-diarization:latest-whisper
 ```
 
-For a different NeMo checkpoint set `ASR_MODEL` in `docker-compose.yml`, or override it at runtime. To build locally: `docker compose build` is replaced by `docker build -t local/speech-api .` (or `docker build -f Dockerfile.whisper -t local/speech-api-whisper .`). The NeMo compose setup requires an NVIDIA GPU and NVIDIA Container Toolkit. Its image uses a slim Python base and CUDA 13.0 PyTorch/TorchAudio wheels, but NeMo and CUDA dependencies still make it multi-gigabyte. The Whisper image defaults to CPU and is considerably smaller; GPU CTranslate2 deployments require compatible CUDA/cuDNN libraries not included in the CPU image.
+### Persistent model cache
+
+The images contain **code and dependencies, not model weights**. At first startup the selected model(s) download from Hugging Face (or NeMo's model source). `docker-compose.yml` bind-mounts `./model-cache` as `HF_HOME` and `./nemo-cache` as `NEMO_CACHE_DIR`, so downloaded checkpoints survive restarts, image upgrades, and container recreation. Both default NeMo models are Hugging Face `.nemo` files and are cached under `./model-cache`; `./nemo-cache` covers NeMo's separate cache used by other checkpoints. Keep these directories when rebuilding. NeMo still **loads** the cached model into GPU memory on every startup; this is not a new download. A model change or cache deletion can trigger another download, and Hugging Face may check for updates online.
+
+For `docker run`, mount persistent storage yourself: `-v speech-models:/models/huggingface -v speech-nemo:/models/nemo` for NeMo; Whisper needs only the first mount. Without volumes, the cache is lost when the container is removed. Downloaded weights are not baked into the published image, keeping the image reusable for other models and avoiding image growth.
+
+For a different NeMo checkpoint set `ASR_MODEL` in `docker-compose.yml`, or override it at runtime. To build locally: `docker compose build` is replaced by `docker build -t local/speech-api .` (or `docker build -f Dockerfile.whisper -t local/speech-api-whisper .`). The NeMo compose setup requires an NVIDIA GPU and NVIDIA Container Toolkit. Its image uses a slim Python base and CUDA 13.0 PyTorch/TorchAudio wheels, but NeMo and CUDA dependencies still make it multi-gigabyte. The runtime also includes a minimal C compiler: PyTorch/Triton compiles attention kernels on the first inference request, even though model startup succeeds without one. The Whisper image defaults to CPU and is considerably smaller; GPU CTranslate2 deployments require compatible CUDA/cuDNN libraries not included in the CPU image.
 
 ### Local Python
 

@@ -19,6 +19,8 @@ services:
       # API_KEY: sk-local
       # HF_TOKEN: ${HF_TOKEN}
     volumes:
+      # Persist checkpoints independently of the container/image lifecycle.
       - ./model-cache:/models/huggingface
+      - ./nemo-cache:/models/nemo
     shm_size: "4gb"
     gpus: all

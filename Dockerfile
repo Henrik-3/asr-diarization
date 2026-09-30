@@ -1,5 +1,6 @@
 # Install the CUDA 13.0 PyTorch wheels into a venv rather than starting from
-# NVIDIA's large development image. Build tools stay out of the final image.
+# NVIDIA's large development image. Triton needs a C compiler at inference
+# time for attention kernels; only the full build toolchain stays out of runtime.
 FROM python:3.12-slim AS builder
 
 ENV PIP_DISABLE_PIP_VERSION_CHECK=1 \
@@ -23,12 +24,15 @@ ENV DEBIAN_FRONTEND=noninteractive \
     PYTHONUNBUFFERED=1 \
     VIRTUAL_ENV=/opt/venv \
     PATH=/opt/venv/bin:$PATH \
-    HF_HOME=/models/huggingface
+    HF_HOME=/models/huggingface \
+    NEMO_CACHE_DIR=/models/nemo
 
 RUN apt-get update && apt-get install -y --no-install-recommends \
-    ffmpeg libsndfile1 libgomp1 curl \
+    ffmpeg libsndfile1 libgomp1 curl gcc libc6-dev \
     && rm -rf /var/lib/apt/lists/*
 COPY --from=builder /opt/venv /opt/venv
+# Flex-attention compiles Triton kernels on the first request, not at startup.
+RUN printf 'int main(void) { return 0; }\n' | cc -x c - -o /tmp/cc-check && rm /tmp/cc-check
 # Fail at build time if any dependency changed the matched CUDA 13.0 pair.
 RUN python -c "import torch, torchaudio; assert torch.version.cuda == '13.0', torch.version.cuda; print('PyTorch', torch.__version__, 'TorchAudio', torchaudio.__version__)"
 
