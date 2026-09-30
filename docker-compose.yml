@@ -1,12 +1,12 @@
 services:
   nemo-speech:
-    build: .
-    image: local/nemo-speech-api:0.2.0
+    image: ghcr.io/henrik-3/asr-diarization:latest
     container_name: nemo-speech
     restart: unless-stopped
     ports:
       - "8000:8000"
     environment:
+      ASR_BACKEND: nemo
       ASR_MODEL: nvidia/nemotron-3.5-asr-streaming-0.6b
       DIARIZATION_MODEL: nvidia/Nemotron-3-Diarization
       SERVED_ASR_MODEL: nvidia/nemotron-3.5-asr-streaming-0.6b

@@ -9,20 +9,21 @@ from contextlib import asynccontextmanager
 from pathlib import Path
 from typing import Any
 
-import torch
-import soundfile as sf
 from fastapi import FastAPI, File, Form, Header, Request, UploadFile
 from fastapi.responses import JSONResponse, PlainTextResponse, Response
 
-log = logging.getLogger("nemo-speech-api")
+log = logging.getLogger("speech-api")
 logging.basicConfig(level=os.getenv("LOG_LEVEL", "INFO").upper())
 
+ASR_BACKEND = os.getenv("ASR_BACKEND", "nemo").lower()
 ASR_MODEL = os.getenv("ASR_MODEL", "nvidia/nemotron-3.5-asr-streaming-0.6b")
+# Set to an empty string to run ASR without loading NeMo diarization.
 DIARIZATION_MODEL = os.getenv("DIARIZATION_MODEL", "nvidia/Nemotron-3-Diarization")
 SERVED_ASR_MODEL = os.getenv("SERVED_ASR_MODEL", ASR_MODEL)
 SERVED_DIARIZATION_MODEL = os.getenv("SERVED_DIARIZATION_MODEL", DIARIZATION_MODEL)
 SERVED_DIARIZED_MODEL = os.getenv("SERVED_DIARIZED_MODEL", f"{SERVED_ASR_MODEL}-diarize")
-DEVICE = os.getenv("DEVICE", "cuda" if torch.cuda.is_available() else "cpu")
+DEVICE = os.getenv("DEVICE", "auto")
+WHISPER_COMPUTE_TYPE = os.getenv("WHISPER_COMPUTE_TYPE", "auto")
 DEFAULT_LANGUAGE = os.getenv("DEFAULT_LANGUAGE", "de")
 API_KEY = os.getenv("API_KEY", "")
 # OpenAI file-transcription API documents a 25 MB file limit. Override if desired.
@@ -102,6 +103,13 @@ def extract_text(result: Any) -> str:
 
 def transcribe_file(path: str, language: str | None = None) -> str:
     model = models["asr"]
+    if ASR_BACKEND == "faster-whisper":
+        # faster-whisper returns (segment iterator, info); consume the iterator
+        # inside the inference lock before the temporary input file is deleted.
+        segments, _ = model.transcribe(path, language=None if language in (None, "auto") else language)
+        return " ".join(s.text.strip() for s in segments if s.text.strip())
+
+    import soundfile as sf
     model_defaults = getattr(model, "cfg", {}).get("model_defaults", {})
     prompt_dictionary = model_defaults.get("prompt_dictionary")
     if prompt_dictionary:
@@ -238,28 +246,46 @@ def verbose_payload(text: str, language: str, duration: float,
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
-    import nemo.collections.asr as nemo_asr
-    from nemo.collections.asr.models import SortformerEncLabelModel
+    if ASR_BACKEND not in {"nemo", "faster-whisper"}:
+        raise ValueError(f"Unknown ASR_BACKEND: {ASR_BACKEND}")
+    if ASR_BACKEND == "faster-whisper" and DIARIZATION_MODEL:
+        raise ValueError("Set DIARIZATION_MODEL='' when using faster-whisper (NeMo diarization is not installed)")
+    served_names = [SERVED_ASR_MODEL]
+    if DIARIZATION_MODEL:
+        served_names.extend([SERVED_DIARIZED_MODEL, SERVED_DIARIZATION_MODEL])
+    if len(set(served_names)) != len(served_names):
+        raise ValueError("Served model names must be distinct")
 
-    log.info("Loading ASR model %s", ASR_MODEL)
-    asr = nemo_asr.models.ASRModel.from_pretrained(ASR_MODEL).to(DEVICE).eval()
+    log.info("Loading %s ASR model %s", ASR_BACKEND, ASR_MODEL)
+    if ASR_BACKEND == "nemo":
+        import torch
+        import nemo.collections.asr as nemo_asr
 
-    log.info("Loading diarization model %s", DIARIZATION_MODEL)
-    diar = SortformerEncLabelModel.from_pretrained(DIARIZATION_MODEL).to(DEVICE).eval()
-    diar.sortformer_modules.chunk_len = DIAR_CHUNK_LEN
-    diar.sortformer_modules.chunk_right_context = DIAR_RIGHT_CONTEXT
-    diar.sortformer_modules.fifo_len = DIAR_FIFO_LEN
-    diar.sortformer_modules.spkcache_update_period = DIAR_SPKCACHE_UPDATE_PERIOD
-    diar._check_streaming_parameters()
+        device = DEVICE if DEVICE != "auto" else ("cuda" if torch.cuda.is_available() else "cpu")
+        models["asr"] = nemo_asr.models.ASRModel.from_pretrained(ASR_MODEL).to(device).eval()
+        if DIARIZATION_MODEL:
+            from nemo.collections.asr.models import SortformerEncLabelModel
 
-    models["asr"] = asr
-    models["diar"] = diar
+            log.info("Loading diarization model %s", DIARIZATION_MODEL)
+            diar = SortformerEncLabelModel.from_pretrained(DIARIZATION_MODEL).to(device).eval()
+            diar.sortformer_modules.chunk_len = DIAR_CHUNK_LEN
+            diar.sortformer_modules.chunk_right_context = DIAR_RIGHT_CONTEXT
+            diar.sortformer_modules.fifo_len = DIAR_FIFO_LEN
+            diar.sortformer_modules.spkcache_update_period = DIAR_SPKCACHE_UPDATE_PERIOD
+            diar._check_streaming_parameters()
+            models["diar"] = diar
+    else:
+        from faster_whisper import WhisperModel
+
+        models["asr"] = WhisperModel(ASR_MODEL, device=DEVICE, compute_type=WHISPER_COMPUTE_TYPE)
     log.info("Models loaded on %s", DEVICE)
-    yield
-    models.clear()
+    try:
+        yield
+    finally:
+        models.clear()
 
 
-app = FastAPI(title="NeMo Speech OpenAI-Compatible API", version="0.2.0", lifespan=lifespan)
+app = FastAPI(title="Speech OpenAI-Compatible API", version="0.3.0", lifespan=lifespan)
 
 
 @app.exception_handler(APIError)
@@ -278,14 +304,12 @@ def health():
 @app.get("/v1/models")
 def list_models(authorization: str | None = Header(default=None)):
     require_auth(authorization)
-    return {
-        "object": "list",
-        "data": [
-            {"id": SERVED_ASR_MODEL, "object": "model", "owned_by": "nvidia"},
-            {"id": SERVED_DIARIZED_MODEL, "object": "model", "owned_by": "nvidia"},
-            {"id": SERVED_DIARIZATION_MODEL, "object": "model", "owned_by": "nvidia"},
-        ],
-    }
+    names = [SERVED_ASR_MODEL]
+    if DIARIZATION_MODEL:
+        names.extend([SERVED_DIARIZED_MODEL, SERVED_DIARIZATION_MODEL])
+    return {"object": "list", "data": [
+        {"id": name, "object": "model", "owned_by": "local"} for name in names
+    ]}
 
 
 async def save_upload(file: UploadFile, directory: str) -> str:
@@ -323,7 +347,9 @@ async def transcriptions(
 ):
     require_auth(authorization)
 
-    valid_models = {SERVED_ASR_MODEL, ASR_MODEL, SERVED_DIARIZED_MODEL}
+    valid_models = {SERVED_ASR_MODEL, ASR_MODEL}
+    if DIARIZATION_MODEL:
+        valid_models.add(SERVED_DIARIZED_MODEL)
     if model not in valid_models:
         raise APIError(404, f"The model '{model}' does not exist", param="model", code="model_not_found")
 
@@ -343,14 +369,16 @@ async def transcriptions(
     if timestamp_granularities and "word" in timestamp_granularities:
         raise APIError(400, "Word-level timestamps are not supported by this backend.", param="timestamp_granularities")
 
-    # Accepted for wire compatibility. NeMo handles its own long-form chunking.
+    # Accepted for wire compatibility, but not applied to inference.
     if prompt:
-        log.debug("prompt accepted but not consumed by current NeMo ASR backend")
+        log.debug("prompt accepted but not consumed by the ASR backend")
     if chunking_strategy:
-        log.debug("chunking_strategy=%s accepted; NeMo backend handles chunking internally", chunking_strategy)
+        log.debug("chunking_strategy=%s accepted but not consumed by the ASR backend", chunking_strategy)
 
     selected_language = language or (languages[0] if languages else None) or DEFAULT_LANGUAGE
     want_diarization = model == SERVED_DIARIZED_MODEL or response_format == "diarized_json"
+    if want_diarization and not DIARIZATION_MODEL:
+        raise APIError(400, "Diarization is not enabled on this server.", param="response_format")
 
     with tempfile.TemporaryDirectory(prefix="nemo-api-") as tmpdir:
         raw_path = await save_upload(file, tmpdir)
@@ -386,7 +414,7 @@ async def diarizations(
     authorization: str | None = Header(default=None),
 ):
     require_auth(authorization)
-    if model not in {SERVED_DIARIZATION_MODEL, DIARIZATION_MODEL}:
+    if not DIARIZATION_MODEL or model not in {SERVED_DIARIZATION_MODEL, DIARIZATION_MODEL}:
         raise APIError(404, f"The model '{model}' does not exist", param="model", code="model_not_found")
 
     with tempfile.TemporaryDirectory(prefix="nemo-api-") as tmpdir:
