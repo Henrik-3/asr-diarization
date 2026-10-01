@@ -241,7 +241,10 @@ def diarize_file(path: str) -> list[dict[str, Any]]:
     result = models["diar"].diarize(audio=[path], batch_size=1)
     if not result:
         return []
-    return [parse_diar_segment(s) for s in result[0]]
+    # NeMo may return all turns for one speaker before the next speaker.
+    # Use conversation order for crops, combined text, subtitles and API output.
+    segments = [parse_diar_segment(s) for s in result[0]]
+    return sorted(segments, key=lambda segment: (segment["start"], segment["end"]))
 
 
 def transcribe_diarized(path: str, language: str | None = None) -> tuple[str, list[dict[str, Any]]]:

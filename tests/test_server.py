@@ -206,6 +206,24 @@ class ServerTests(unittest.TestCase):
                 with self.assertRaises(ValueError):
                     server.transcribe_file("unused.wav")
 
+    def test_diarized_transcription_orders_speaker_grouped_turns(self):
+        server.models["diar"] = SimpleNamespace(diarize=Mock(return_value=[[
+            "0.0 2.0 speaker_0", "10.0 12.0 speaker_0",
+            "3.0 5.0 speaker_1", "11.0 13.0 speaker_1",
+        ]]))
+        with patch.object(server.subprocess, "run", return_value=SimpleNamespace(returncode=0)) as crop, \
+             patch.object(server, "transcribe_file", side_effect=["first", "second", "third", "overlap"]):
+            text, segments = server.transcribe_diarized("audio.wav", "de")
+        self.assertEqual(text, "first second third overlap")
+        self.assertEqual([segment["start"] for segment in segments], [0, 3, 10, 11])
+        self.assertEqual([segment["speaker"] for segment in segments],
+                         ["speaker_0", "speaker_1", "speaker_0", "speaker_1"])
+        self.assertEqual([call.args[0][call.args[0].index("-ss") + 1] for call in crop.call_args_list],
+                         ["0.000", "3.000", "10.000", "11.000"])
+        # Overlapping speakers remain separate turns rather than being lost.
+        self.assertEqual(segments[2]["end"], 12)
+        self.assertEqual(segments[3]["start"], 11)
+
     def test_asr_only_models_and_diarization_error(self):
         with patch.object(server, "DIARIZATION_MODEL", ""):
             result = self.client.get("/v1/models")
