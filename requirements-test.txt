@@ -1,0 +1,5 @@
+# CPU-only server tests; no NeMo models or GPU runtime required.
+fastapi
+python-multipart
+httpx
+omegaconf

@@ -263,3 +263,14 @@ Uploads are normalized with ffmpeg to mono 16 kHz PCM WAV before inference. Whis
 ## Compatibility note
 
 The HTTP contract is designed to work with OpenAI-style transcription clients. Exact model capabilities are not identical to OpenAI-hosted transcription models: unsupported capabilities return a 400 error instead of fabricated data. `verbose_json` and subtitles use whole-file timestamps without diarization, not word-accurate timings. The raw `/v1/audio/diarizations` route is an intentional local extension (NeMo diarization only).
+
+## Tests
+
+Install the same lightweight dependencies used by CI, then run the suite:
+
+```bash
+python -m pip install -r requirements-test.txt
+python -m unittest discover -s tests -v
+```
+
+Tests use model doubles and do not require downloaded checkpoints or a GPU.
