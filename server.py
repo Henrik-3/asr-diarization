@@ -1,6 +1,8 @@
 import asyncio
 import json
 import logging
+import math
+import string
 import os
 import subprocess
 import tempfile
@@ -28,6 +30,10 @@ DEFAULT_LANGUAGE = os.getenv("DEFAULT_LANGUAGE", "de")
 API_KEY = os.getenv("API_KEY", "")
 # OpenAI file-transcription API documents a 25 MB file limit. Override if desired.
 MAX_UPLOAD_MB = int(os.getenv("MAX_UPLOAD_MB", "25"))
+
+# Bound attention memory independently of upload size or recording duration.
+ASR_CHUNK_SECONDS = float(os.getenv("ASR_CHUNK_SECONDS", "30"))
+ASR_CHUNK_OVERLAP_SECONDS = float(os.getenv("ASR_CHUNK_OVERLAP_SECONDS", "2"))
 
 DIAR_CHUNK_LEN = int(os.getenv("DIAR_CHUNK_LEN", "340"))
 DIAR_RIGHT_CONTEXT = int(os.getenv("DIAR_RIGHT_CONTEXT", "40"))
@@ -101,7 +107,62 @@ def extract_text(result: Any) -> str:
     return str(result)
 
 
+def merge_chunk_text(previous: str, current: str) -> str:
+    """Remove an exact word overlap, tolerating casing and edge punctuation.
+
+    Without word timestamps this is deliberately conservative: differing
+    recognition at a boundary can still leave repeated words.
+    """
+    left, right = previous.split(), current.split()
+    normalize = lambda word: word.strip(string.punctuation + "„“”‘’…").casefold()
+    for count in range(min(32, len(left), len(right)), 1, -1):
+        suffix = [normalize(word) for word in left[-count:]]
+        prefix = [normalize(word) for word in right[:count]]
+        if all(suffix) and suffix == prefix:
+            return " ".join(left + right[count:])
+    return " ".join(left + right)
+
+
 def transcribe_file(path: str, language: str | None = None) -> str:
+    if ASR_BACKEND == "faster-whisper":
+        return transcribe_chunk(path, language)
+    if (not math.isfinite(ASR_CHUNK_SECONDS) or ASR_CHUNK_SECONDS <= 0
+            or not math.isfinite(ASR_CHUNK_OVERLAP_SECONDS)
+            or not 0 <= ASR_CHUNK_OVERLAP_SECONDS < ASR_CHUNK_SECONDS):
+        raise ValueError("ASR chunk duration must be positive and overlap must be smaller than duration")
+
+    # Read only one chunk into host memory; never decode the whole recording
+    # into a float array. Temporary WAVs support both NeMo input interfaces.
+    with wave.open(path, "rb") as source:
+        rate = source.getframerate()
+        chunk_frames = int(ASR_CHUNK_SECONDS * rate)
+        overlap_frames = int(ASR_CHUNK_OVERLAP_SECONDS * rate)
+        if chunk_frames < 1 or chunk_frames <= overlap_frames:
+            raise ValueError("ASR chunk settings must allow progress by at least one audio frame")
+        total = source.getnframes()
+        if total <= chunk_frames:
+            return transcribe_chunk(path, language)
+        log.info("Chunking %.1fs audio into at most %.1fs ASR windows", total / rate, ASR_CHUNK_SECONDS)
+        text = ""
+        with tempfile.TemporaryDirectory(prefix="nemo-asr-chunks-") as tmpdir:
+            chunk_path = str(Path(tmpdir) / "chunk.wav")
+            start = 0
+            while start < total:
+                source.setpos(start)
+                frames = source.readframes(min(chunk_frames, total - start))
+                with wave.open(chunk_path, "wb") as output:
+                    output.setparams(source.getparams())
+                    output.writeframes(frames)
+                chunk_text = transcribe_chunk(chunk_path, language).strip()
+                text = (merge_chunk_text(text, chunk_text) if overlap_frames
+                        else " ".join(part for part in (text, chunk_text) if part))
+                if start + chunk_frames >= total:
+                    break
+                start += chunk_frames - overlap_frames
+        return text
+
+
+def transcribe_chunk(path: str, language: str | None = None) -> str:
     model = models["asr"]
     if ASR_BACKEND == "faster-whisper":
         # faster-whisper returns (segment iterator, info); consume the iterator

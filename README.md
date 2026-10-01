@@ -120,6 +120,24 @@ curl http://localhost:8000/v1/audio/transcriptions \
   -F 'response_format=text'
 ```
 
+## Long recordings
+
+NeMo ASR automatically processes recordings in sequential windows of at most 30
+seconds, with 2 seconds of overlap. No client changes or chunking parameter are
+required. This bounds each ASR attention allocation instead of letting it grow
+with the square of the entire recording's duration. Only one audio window is read
+into a host-side sample array at a time. Short recordings use one inference call.
+Long diarized speaker segments and the no-speakers fallback use the same limits;
+diarization retains its existing streaming configuration and speaker identities.
+Whisper continues to use its backend's own segmentation.
+
+Matching overlap text is removed using conservative word matching. Recognition
+can differ between windows, so boundary words may still repeat or be missed;
+this is not timestamp-aligned stitching. Overall memory still depends on the
+selected models, diarization backend, and hardware. Advanced deployments can tune
+`ASR_CHUNK_SECONDS` and `ASR_CHUNK_OVERLAP_SECONDS`; duration must be positive and
+finite, and overlap must be nonnegative, finite, and smaller than duration.
+
 ## Diarized transcription, OpenAI-style
 
 ```bash
@@ -175,6 +193,8 @@ curl http://localhost:8000/v1/audio/diarizations \
 | `DEVICE` | `auto` (NeMo selects CUDA if available; faster-whisper selects its own device) |
 | `DEFAULT_LANGUAGE` | `de` (Whisper image uses `auto` for language detection) |
 | `MAX_UPLOAD_MB` | `25` |
+| `ASR_CHUNK_SECONDS` | `30` (NeMo ASR) |
+| `ASR_CHUNK_OVERLAP_SECONDS` | `2` (NeMo ASR) |
 | `API_KEY` | empty = disabled |
 | `DIAR_CHUNK_LEN` | `340` |
 | `DIAR_RIGHT_CONTEXT` | `40` |
