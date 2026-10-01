@@ -32,6 +32,7 @@ API_KEY = os.getenv("API_KEY", "")
 MAX_UPLOAD_MB = int(os.getenv("MAX_UPLOAD_MB", "25"))
 
 # Bound attention memory independently of upload size or recording duration.
+ASR_USE_CUDA_GRAPHS = os.getenv("ASR_USE_CUDA_GRAPHS", "false").lower() in {"1", "true", "yes"}
 ASR_CHUNK_SECONDS = float(os.getenv("ASR_CHUNK_SECONDS", "30"))
 ASR_CHUNK_OVERLAP_SECONDS = float(os.getenv("ASR_CHUNK_OVERLAP_SECONDS", "2"))
 
@@ -195,6 +196,47 @@ def transcribe_chunk(path: str, language: str | None = None) -> str:
     return extract_text(result)
 
 
+def run_transcription(path: str, language: str, diarized: bool,
+                      strip_lang_tags: bool = True,
+                      asr_right_context: int | None = None) -> tuple[str, list[dict[str, Any]]]:
+    """Apply request options while the caller holds model_lock, then restore them."""
+    model = models.get("asr")
+    encoder = getattr(model, "encoder", None)
+    previous_context = None
+    if asr_right_context is not None:
+        if ASR_BACKEND != "nemo" or not callable(getattr(encoder, "set_default_att_context_size", None)):
+            raise APIError(400, "ASR right context is not supported by this backend/model.", param="asr_right_context")
+        current = getattr(encoder, "att_context_size", None)
+        supported = getattr(encoder, "att_context_size_all", [])
+        if current is None or len(current) != 2:
+            raise APIError(400, "ASR right context is not supported by this encoder.", param="asr_right_context")
+        requested = [current[0], asr_right_context]
+        if requested not in [list(context) for context in supported]:
+            raise APIError(400, f"Unsupported attention context {requested}; model supports {supported}.",
+                           param="asr_right_context")
+        previous_context = list(current)
+
+    decoder = getattr(model, "decoding", None)
+    prompt_dictionary = getattr(model, "cfg", {}).get("model_defaults", {}).get("prompt_dictionary")
+    tag_setter = getattr(decoder, "set_strip_lang_tags", None)
+    configure_tags = ASR_BACKEND == "nemo" and bool(prompt_dictionary) and callable(tag_setter)
+    previous_strip = getattr(decoder, "strip_lang_tags", False)
+    previous_pattern = getattr(getattr(decoder, "lang_tag_pattern", None), "pattern", None)
+    try:
+        if previous_context is not None:
+            encoder.set_default_att_context_size(requested)
+        if configure_tags:
+            tag_setter(strip_lang_tags)
+        if diarized:
+            return transcribe_diarized(path, language)
+        return transcribe_file(path, language), []
+    finally:
+        if configure_tags:
+            tag_setter(previous_strip, lang_tag_pattern=previous_pattern)
+        if previous_context is not None:
+            encoder.set_default_att_context_size(previous_context)
+
+
 def diarize_file(path: str) -> list[dict[str, Any]]:
     result = models["diar"].diarize(audio=[path], batch_size=1)
     if not result:
@@ -305,6 +347,26 @@ def verbose_payload(text: str, language: str, duration: float,
     }
 
 
+def configure_nemo_decoding(model: Any) -> None:
+    """Prefer eager RNN-T decoding for variable-length, multi-model serving."""
+    if ASR_USE_CUDA_GRAPHS or not hasattr(model, "joint"):
+        return
+    change_strategy = getattr(model, "change_decoding_strategy", None)
+    config = getattr(model, "cfg", {}).get("decoding")
+    if not callable(change_strategy) or config is None:
+        return
+    if config.get("strategy", "greedy_batch") not in {"greedy", "greedy_batch"}:
+        return
+
+    from omegaconf import OmegaConf
+
+    # Reconstruct the decoder: changing only the config after construction
+    # leaves the existing graph-enabled decoding computer in place.
+    decoding = OmegaConf.merge(config, {"greedy": {"use_cuda_graph_decoder": False}})
+    change_strategy(decoding)
+    log.info("NeMo RNN-T CUDA graph decoding disabled (compatibility default)")
+
+
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     if ASR_BACKEND not in {"nemo", "faster-whisper"}:
@@ -324,6 +386,7 @@ async def lifespan(app: FastAPI):
 
         device = DEVICE if DEVICE != "auto" else ("cuda" if torch.cuda.is_available() else "cpu")
         models["asr"] = nemo_asr.models.ASRModel.from_pretrained(ASR_MODEL).to(device).eval()
+        configure_nemo_decoding(models["asr"])
         if DIARIZATION_MODEL:
             from nemo.collections.asr.models import SortformerEncLabelModel
 
@@ -397,6 +460,8 @@ async def transcriptions(
     prompt: str | None = Form(default=None),
     response_format: str = Form(default="json"),
     temperature: float = Form(default=0.0),
+    strip_lang_tags: bool = Form(default=True),
+    asr_right_context: int | None = Form(default=None),
     stream: bool = Form(default=False),
     chunking_strategy: str | None = Form(default=None),
     timestamp_granularities: list[str] | None = Form(default=None, alias="timestamp_granularities[]"),
@@ -448,11 +513,10 @@ async def transcriptions(
         duration = wav_duration(wav_path)
 
         async with model_lock:
-            if want_diarization:
-                text, segments = await asyncio.to_thread(transcribe_diarized, wav_path, selected_language)
-            else:
-                text = await asyncio.to_thread(transcribe_file, wav_path, selected_language)
-                segments = []
+            text, segments = await asyncio.to_thread(
+                run_transcription, wav_path, selected_language, want_diarization,
+                strip_lang_tags, asr_right_context,
+            )
 
         if response_format == "text":
             return PlainTextResponse(text, media_type="text/plain; charset=utf-8")

@@ -120,6 +120,47 @@ curl http://localhost:8000/v1/audio/transcriptions \
   -F 'response_format=text'
 ```
 
+## HTTP options that affect behavior
+
+Send these as multipart form fields to `/v1/audio/transcriptions`:
+
+| Field | Behavior |
+|---|---|
+| `model` | Required served model name; the `-diarize` alias enables speaker attribution. It does not load a new checkpoint per request. |
+| `language` | Target language. For the default NeMo model, `de-DE`, `de`, and `auto` are supported and forwarded as `target_lang`. Defaults to `DEFAULT_LANGUAGE`. |
+| `languages[]` | Only the first entry is used, and only when `language` is absent. |
+| `response_format` | `json`, `text`, `verbose_json`, `srt`, `vtt`, or `diarized_json`. The last enables diarization. |
+| `strip_lang_tags` | Extension, default `true`: use NeMo's native decoder option to remove language tags before merging chunks. Set `false` to retain tags emitted by the model. Applies to prompt-conditioned NeMo models supporting this option. |
+| `asr_right_context` | Extension, optional: encoder right-context frames, validated against the loaded NeMo model's supported contexts while keeping its left context. Unsupported backends/settings return 400. Omit to retain the checkpoint's default. |
+| `timestamp_granularities[]` | `segment` with `verbose_json`; without diarization timestamps cover the whole file. Word timestamps are unsupported. |
+
+For Nemotron 3.5, supported right contexts are `0`, `1`, `3`, `6`, and `13`,
+corresponding to native streaming windows of 80, 160, 320, 560, and 1120 ms.
+Larger lookahead can improve recognition accuracy. This server applies the encoder
+context within its bounded file-transcription windows; it does not implement the
+cache-aware streaming CLI or promise those HTTP response times. These settings
+are distinct from `ASR_CHUNK_SECONDS`, which bounds memory. Increasing a request
+timeout does not improve recognition. The context and tag settings apply only to
+the current request and are restored even if transcription fails.
+
+```bash
+curl http://localhost:8000/v1/audio/transcriptions \
+  -F 'file=@meeting.m4a' \
+  -F 'model=nvidia/nemotron-3.5-asr-streaming-0.6b' \
+  -F 'language=de-DE' \
+  -F 'strip_lang_tags=true' \
+  -F 'asr_right_context=13'
+```
+
+`prompt`, `temperature`, and `chunking_strategy` are accepted but **do not affect
+inference** (`temperature` is only range-validated). `stream=true`, nonempty
+`include[]`, known-speaker references/names, and word timestamps are rejected.
+NeMo CLI arguments such as `target_lang`, `att_context_size`, and `batch_size`
+are not HTTP fields; use the documented equivalents above. Unknown form fields
+are ignored by FastAPI. Chunk duration/overlap, CUDA graph decoding, model
+selection, and diarization cache settings are server environment configuration,
+not per-request fields. `/docs` provides the generated API schema.
+
 ## Long recordings
 
 NeMo ASR automatically processes recordings in sequential windows of at most 30
@@ -137,6 +178,21 @@ this is not timestamp-aligned stitching. Overall memory still depends on the
 selected models, diarization backend, and hardware. Advanced deployments can tune
 `ASR_CHUNK_SECONDS` and `ASR_CHUNK_OVERLAP_SECONDS`; duration must be positive and
 finite, and overlap must be nonnegative, finite, and smaller than duration.
+
+### CUDA decoder compatibility
+
+Greedy RNN-T models use eager decoding by default, disabling NeMo's CUDA graph
+decoder optimization. This is a compatibility measure for serving variable-length
+ASR chunks and speaker segments alongside diarization; it may reduce throughput.
+Set `ASR_USE_CUDA_GRAPHS=true` to preserve the checkpoint's decoder setting after
+validating it on your GPU. Other decoder types are left unchanged.
+
+A `CUDA error: an illegal memory access was encountered` is distinct from an
+out-of-memory error. Restart the container after this error before retrying; the
+process can still answer `/health` even though its CUDA context is unusable. The
+eager decoder is a mitigation, not a verified fix for every illegal-access error.
+If it persists, a diagnostic run with `CUDA_LAUNCH_BLOCKING=1` can help locate the
+failing kernel (at a performance cost).
 
 ## Diarized transcription, OpenAI-style
 
@@ -193,6 +249,7 @@ curl http://localhost:8000/v1/audio/diarizations \
 | `DEVICE` | `auto` (NeMo selects CUDA if available; faster-whisper selects its own device) |
 | `DEFAULT_LANGUAGE` | `de` (Whisper image uses `auto` for language detection) |
 | `MAX_UPLOAD_MB` | `25` |
+| `ASR_USE_CUDA_GRAPHS` | `false` (NeMo greedy RNN-T decoder; `true` preserves checkpoint behavior) |
 | `ASR_CHUNK_SECONDS` | `30` (NeMo ASR) |
 | `ASR_CHUNK_OVERLAP_SECONDS` | `2` (NeMo ASR) |
 | `API_KEY` | empty = disabled |
