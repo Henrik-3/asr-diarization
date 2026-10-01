@@ -362,7 +362,10 @@ def configure_nemo_decoding(model: Any) -> None:
 
     # Reconstruct the decoder: changing only the config after construction
     # leaves the existing graph-enabled decoding computer in place.
-    decoding = OmegaConf.merge(config, {"greedy": {"use_cuda_graph_decoder": False}})
+    decoding = OmegaConf.create(config)
+    # Older checkpoint configs omit this supported NeMo option and enable
+    # struct mode. Add only this key on the copy without relaxing the source.
+    OmegaConf.update(decoding, "greedy.use_cuda_graph_decoder", False, force_add=True)
     change_strategy(decoding)
     log.info("NeMo RNN-T CUDA graph decoding disabled (compatibility default)")
 

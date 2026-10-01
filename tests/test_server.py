@@ -95,6 +95,28 @@ class ServerTests(unittest.TestCase):
         self.assertTrue(config.preserve_alignments)
         self.assertTrue(model.cfg["decoding"]["greedy"]["use_cuda_graph_decoder"])
 
+    def test_rnnt_graph_compatibility_with_strict_checkpoint_config(self):
+        from omegaconf import OmegaConf
+
+        checkpoint = OmegaConf.create({"decoding": {
+            "strategy": "greedy_batch", "greedy": {"max_symbols": 10},
+            "preserve_alignments": True,
+        }})
+        OmegaConf.set_struct(checkpoint, True)
+        # Checkpoints may also explicitly mark nested config nodes as strict.
+        OmegaConf.set_struct(checkpoint.decoding.greedy, True)
+        original = OmegaConf.to_container(checkpoint)
+        model = SimpleNamespace(joint=object(), cfg=checkpoint, change_decoding_strategy=Mock())
+        with patch.object(server, "ASR_USE_CUDA_GRAPHS", False):
+            server.configure_nemo_decoding(model)
+        config = model.change_decoding_strategy.call_args.args[0]
+        self.assertFalse(config.greedy.use_cuda_graph_decoder)
+        self.assertEqual(config.greedy.max_symbols, 10)
+        self.assertTrue(config.preserve_alignments)
+        self.assertEqual(OmegaConf.to_container(checkpoint), original)
+        self.assertTrue(OmegaConf.is_struct(checkpoint))
+        self.assertTrue(OmegaConf.is_struct(checkpoint.decoding.greedy))
+
     def test_graph_compatibility_skips_opt_in_and_other_decoders(self):
         model = SimpleNamespace(joint=object(), cfg={"decoding": {"strategy": "beam"}},
                                 change_decoding_strategy=Mock())
